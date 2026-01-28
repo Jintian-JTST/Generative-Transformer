@@ -1,78 +1,95 @@
 import torch
 import torch.nn as nn
 import intel_extension_for_pytorch as ipex
+import time
 
-# 1️⃣ 设备选择
+# =================配置区 (在这里调节压力)=================
+# 1. 增加宽度：矩阵运算量是宽度的平方级。4096 -> 8192 计算量翻4倍
+HIDDEN_DIM = 8192   
+# 2. 增加深度：层数越多，串行计算越久
+NUM_LAYERS = 20     
+# 3. 增加 Batch Size：这是填满计算单元(EU/Core)的关键。
+#    如果显存溢出(OOM)，请减小这个值；如果显存没满，往死里加。
+BATCH_SIZE = 2048   
+# 4. 持续循环次数：单次运行不够热，必须持续轰炸
+LOOP_COUNT = 100    
+# ========================================================
+
 device = torch.device("xpu" if torch.xpu.is_available() else "cpu")
 print(f"🔥 Current Device: {device}")
 
-# 2️⃣ 模型：换一个“大压力”模型 (3层 4096 宽度的 MLP，模拟高负载矩阵乘法)
-class HeavyPressureModel(nn.Module):
-    def __init__(self):
+# 动态构建超重模型
+class SuperHeavyModel(nn.Module):
+    def __init__(self, input_dim, hidden_dim, layers):
         super().__init__()
-        # 增大维度：从 1024 -> 4096，计算量翻 16 倍
-        self.fc1 = nn.Linear(4096, 4096)
-        self.act1 = nn.GELU()  # GELU 比 ReLU 计算稍微重一点
+        model_list = []
+        # 输入层
+        model_list.append(nn.Linear(input_dim, hidden_dim))
+        model_list.append(nn.GELU())
         
-        self.fc2 = nn.Linear(4096, 4096)
-        self.act2 = nn.GELU()
-        
-        self.fc3 = nn.Linear(4096, 4096) # "三" 压力 -> 第三层
+        # 中间层 (大量堆叠)
+        for _ in range(layers - 2):
+            model_list.append(nn.Linear(hidden_dim, hidden_dim))
+            model_list.append(nn.GELU()) # GELU 包含 exp/tanh 运算，比 ReLU 累
+            
+        # 输出层
+        model_list.append(nn.Linear(hidden_dim, hidden_dim))
+        self.net = nn.Sequential(*model_list)
 
     def forward(self, x):
-        x = self.act1(self.fc1(x))
-        x = self.act2(self.fc2(x))
-        x = self.fc3(x)
-        return x
+        return self.net(x)
 
-model = HeavyPressureModel().to(device)
+print(f"🏗️ Building Model: {NUM_LAYERS} Layers, {HIDDEN_DIM} Width...")
+model = SuperHeavyModel(4096, HIDDEN_DIM, NUM_LAYERS).to(device)
 model.eval()
 
-# 3️⃣ 数据：增大 Batch Size (增加吞吐压力)
-# 4096维 * 64 batch size = 很大的矩阵
-BATCH_SIZE = 64
-input_data = torch.randn(BATCH_SIZE, 4096, device=device)
-
-# 4️⃣ IPEX 优化：开启 BF16 (BFloat16)
-# Intel 硬件(CPU/Arc/Data Center GPU) 跑 BF16 效率最高，压力测试必开
-print("🛠️  Optimizing with IPEX (BF16)...")
+# 数据生成 (消耗大量带宽)
+print(f"📦 Generating Data (Batch: {BATCH_SIZE})...")
 try:
-    # 尝试开启 BF16 优化
+    input_data = torch.randn(BATCH_SIZE, 4096, device=device)
+except RuntimeError as e:
+    print("❌ 显存不足 (OOM)，请减小 BATCH_SIZE 或 HIDDEN_DIM")
+    raise e
+
+# IPEX 优化
+print("🛠️ Optimizing with IPEX (BF16)...")
+try:
     model = ipex.optimize(model, dtype=torch.bfloat16)
     use_bf16 = True
-    print("✅ BF16 Optimization Enabled.")
-except Exception as e:
-    # 如果硬件不支持 BF16，回退到 FP32
-    print(f"⚠️  BF16 not supported ({e}), fallback to FP32.")
+except Exception:
     model = ipex.optimize(model)
     use_bf16 = False
+    print("⚠️ Fallback to FP32")
 
-# 5️⃣ 推理 (Forward)
-print("🚀 Running Forward Pass (Stress Test)...")
-
-# 根据设备类型选择 AMP 上下文
+# 压力测试主循环
+print(f"🚀 Starting Stress Loop ({LOOP_COUNT} iterations)...")
 amp_device_type = "xpu" if device.type == "xpu" else "cpu"
 
-with torch.no_grad():
-    # 预热 (Warmup) - 让硬件进入高性能状态
-    for _ in range(5):
-        if use_bf16:
-            with torch.autocast(device_type=amp_device_type, enabled=True, dtype=torch.bfloat16):
-                _ = model(input_data)
-        else:
-            _ = model(input_data)
-            
-    # 正式运行
-    import time
-    start = time.time()
-    
-    if use_bf16:
-        with torch.autocast(device_type=amp_device_type, enabled=True, dtype=torch.bfloat16):
-            output = model(input_data)
-    else:
-        output = model(input_data)
-        
-    cost = time.time() - start
+# 预热
+for _ in range(5):
+    with torch.autocast(device_type=amp_device_type, enabled=use_bf16, dtype=torch.bfloat16):
+        _ = model(input_data)
 
-print(f"✅ Forward OK. Output shape: {output.shape}")
-print(f"⏱️  Time cost: {cost * 1000:.2f} ms")
+torch.xpu.synchronize() if device.type == "xpu" else None
+start_time = time.time()
+
+# 持续轰炸
+for i in range(LOOP_COUNT):
+    with torch.autocast(device_type=amp_device_type, enabled=use_bf16, dtype=torch.bfloat16):
+        output = model(input_data)
+    
+    # 每 50 次同步一次，防止 CPU 跑太快 GPU 队列堆积导致测量不准，
+    # 但为了最大化压力，通常不需要频繁同步，只需要让 GPU 队列塞满。
+    if i % 1 == 0:
+            # 强制 CPU 等 GPU 算完这一步再打印，这样进度条就是实时的了
+            torch.xpu.synchronize() 
+            print(f"   Step {i}/{LOOP_COUNT} completed...")
+
+# 确保所有计算完成
+torch.xpu.synchronize() if device.type == "xpu" else None
+end_time = time.time()
+total_time = end_time - start_time
+
+print(f"✅ Stress Test Finished.")
+print(f"⏱️ Total Time: {total_time:.2f}s")
+print(f"⚡ Throughput: {LOOP_COUNT / total_time:.2f} iter/s")
