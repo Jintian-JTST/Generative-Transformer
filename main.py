@@ -1,3 +1,9 @@
+import torch
+import torch.nn as nn
+from torch.nn import functional as F
+device = "xpu"
+
+
 with open(r"dataset/01.txt", "r", encoding='utf-8') as file:
     content = file.read()
 
@@ -16,12 +22,11 @@ def encode(s):
     return [stoi[c] for c in s]
 def decode(l):
     return ''.join(itos[i] for i in l)
+data = torch.tensor(encode(content), dtype=torch.long)
 
 '''print(encode("hello world"))
 print(decode(encode("hello world")))'''
 
-import torch
-data = torch.tensor(encode(content), dtype=torch.long)
 '''print(data.shape, data.dtype)
 print(data[:100])'''  # Print the first 100 encoded integers to verify encoding
 
@@ -57,9 +62,7 @@ print(x)
 print("targets:")
 print(y)'''
 
-#print(x)
-import torch.nn as nn
-from torch.nn import functional as F
+
 class BigramLanguageModel(nn.Module):
     def __init__(self, vocab_size):
         super().__init__()
@@ -96,15 +99,25 @@ class BigramLanguageModel(nn.Module):
     
 # 假设你之前已经定义了 vocab_size 和获取了 x, y
 model = BigramLanguageModel(vocab_size)
+m = model.to(device)
+
+'''logits, loss = model(x, y)
+print("logits shape:", logits.shape)
+print("loss:", loss)
+print(decode(m.generate(torch.zeros((1, 1), dtype=torch.long).to(device), max_new_tokens=100)[0].tolist()))  # Decode the predicted tokens for verification
+
+'''    
+# 假设你之前已经定义了 vocab_size 和获取了 x, y
+model = BigramLanguageModel(vocab_size)
+m = model.to(device)
 logits, loss = model(x, y)
 print("logits shape:", logits.shape)
 print("loss:", loss)
-print(decode(model.generate(torch.zeros((1, 1), dtype=torch.long), max_new_tokens=100)[0].tolist()))  # Decode the predicted tokens for verification
-
+print(decode(m.generate(torch.zeros((1, 1), dtype=torch.long).to(device), max_new_tokens=100)[0].tolist()))  # Decode the predicted tokens for verification
 
 optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
 batch_size = 32
-for steps in range(100000):
+for steps in range(10000):
     xb, yb = get_batch('train')
 
     logits, loss = model(xb, yb)
@@ -112,5 +125,5 @@ for steps in range(100000):
     loss.backward()
     optimizer.step()
 
-    if steps % 1000 == 0:
-        print(f"step {steps}: loss {loss.item()}")
+print(f"step {steps+1}: loss {loss.item()}")
+print(decode(model.generate(torch.zeros((1, 1), dtype=torch.long), max_new_tokens=100)[0].tolist()))  # Decode the predicted tokens for verification
