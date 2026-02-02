@@ -22,7 +22,7 @@ def encode(s):
     return [stoi[c] for c in s]
 def decode(l):
     return ''.join(itos[i] for i in l)
-data = torch.tensor(encode(content), dtype=torch.long)
+data = torch.tensor(encode(content), dtype=torch.long, device=device)
 
 '''print(encode("hello world"))
 print(decode(encode("hello world")))'''
@@ -110,20 +110,20 @@ print(decode(m.generate(torch.zeros((1, 1), dtype=torch.long).to(device), max_ne
 # 假设你之前已经定义了 vocab_size 和获取了 x, y
 model = BigramLanguageModel(vocab_size)
 m = model.to(device)
-logits, loss = model(x, y)
+logits, loss = m(x, y)
 print("logits shape:", logits.shape)
 print("loss:", loss)
 print(decode(m.generate(torch.zeros((1, 1), dtype=torch.long).to(device), max_new_tokens=100)[0].tolist()))  # Decode the predicted tokens for verification
 
 optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
 batch_size = 32
-for steps in range(10000):
+for steps in range(1000):
     xb, yb = get_batch('train')
 
     logits, loss = model(xb, yb)
     optimizer.zero_grad(set_to_none=True)
     loss.backward()
     optimizer.step()
-
-print(f"step {steps+1}: loss {loss.item()}")
-print(decode(model.generate(torch.zeros((1, 1), dtype=torch.long), max_new_tokens=100)[0].tolist()))  # Decode the predicted tokens for verification
+    if steps % 100 == 0:
+        print(f"step {steps+1}: loss {loss.item()}")
+        print(decode(m.generate(torch.zeros((1, 1), dtype=torch.long).to(device), max_new_tokens=100)[0].tolist()))  # Decode the predicted tokens for verification
