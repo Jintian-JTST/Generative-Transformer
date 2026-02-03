@@ -2,7 +2,12 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 device = "xpu"
-
+batch_size = 4
+block_size = 8  # context length for predictions
+batch_size = 32
+max_iters = 10000
+eval_interval = 500
+n_embd = 32
 
 with open(r"dataset/01.txt", "r", encoding='utf-8') as file:
     content = file.read()
@@ -36,7 +41,6 @@ train_data = data[:n]
 val_data = data[n:]
 
 # Demonstrate how to create input-target pairs for training
-block_size = 8  # context length for predictions
 train_data[:block_size+1]
 
 x = train_data[:block_size]
@@ -55,7 +59,6 @@ def get_batch(split):
     y = torch.stack([data[i+1:i+block_size+1] for i in ix])
     return x, y
 
-batch_size = 4
 x, y = get_batch('train')
 '''print("inputs:")
 print(x)
@@ -67,11 +70,18 @@ class BigramLanguageModel(nn.Module):
     def __init__(self, vocab_size):
         super().__init__()
         # each token directly reads off the logits for the next token from a lookup table
-        self.token_embedding_table = nn.Embedding(vocab_size, vocab_size)
+        self.token_embedding_table = nn.Embedding(vocab_size, n_embd)
+        self.position_embedding_table = nn.Embedding(block_size, n_embd)
+        self.lm_head = nn.Linear(n_embd, vocab_size)
 
     def forward(self, idx, targets=None):
+        B, T = idx.shape
         # idx and targets are both (B,T) tensor of integers
-        logits = self.token_embedding_table(idx)  # (B,T,C)
+        tok_emb = self.token_embedding_table(idx)  # (B,T,C)
+        pos_emb = self.position_embedding_table(torch.arange(T, device=device))  # (T,C)
+        x = tok_emb + pos_emb  # (B,T,C)
+        logits = self.lm_head(x) # (B,T,vocab_size)
+
         if targets is None:
             loss = None
         else:
@@ -97,9 +107,6 @@ class BigramLanguageModel(nn.Module):
             idx = torch.cat((idx, idx_next), dim=1)  # (B,T+1)
         return idx
     
-# 假设你之前已经定义了 vocab_size 和获取了 x, y
-model = BigramLanguageModel(vocab_size)
-m = model.to(device)
 
 '''logits, loss = model(x, y)
 print("logits shape:", logits.shape)
@@ -116,14 +123,14 @@ print("loss:", loss)
 print(decode(m.generate(torch.zeros((1, 1), dtype=torch.long).to(device), max_new_tokens=100)[0].tolist()))  # Decode the predicted tokens for verification
 
 optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
-batch_size = 32
-for steps in range(1000):
+for steps in range(max_iters):
     xb, yb = get_batch('train')
 
     logits, loss = model(xb, yb)
     optimizer.zero_grad(set_to_none=True)
     loss.backward()
     optimizer.step()
-    if steps % 100 == 0:
-        print(f"step {steps+1}: loss {loss.item()}")
+    if steps % eval_interval == 0:
+        print(f"step {steps}: loss {loss.item()}")
+        print("----")
         print(decode(m.generate(torch.zeros((1, 1), dtype=torch.long).to(device), max_new_tokens=100)[0].tolist()))  # Decode the predicted tokens for verification
