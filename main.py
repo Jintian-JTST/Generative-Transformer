@@ -8,6 +8,7 @@ batch_size = 32
 max_iters = 10000
 eval_interval = 500
 n_embd = 32
+learning_rate = 1e-3
 
 with open(r"dataset/01.txt", "r", encoding='utf-8') as file:
     content = file.read()
@@ -17,8 +18,8 @@ print(content[:100])'''  # Print the first 100 characters to verify content
 
 chars=sorted(list(set(content)))
 vocab_size=len(chars)
-print("Vocab size:", vocab_size)
-print("Characters:", ''.join(chars))
+'''print("Vocab size:", vocab_size)
+print("Characters:", ''.join(chars))'''
 
 # Create mappings from characters to integers and vice versa
 stoi={ch:i for i,ch in enumerate(chars)}
@@ -66,12 +67,38 @@ print("targets:")
 print(y)'''
 
 
+
+class Head(nn.Module):
+    """ one head of self-attention """
+
+    def __init__(self, head_size):
+        super().__init__()
+        self.key = nn.Linear(n_embd, head_size, bias=False)
+        self.query = nn.Linear(n_embd, head_size, bias=False)
+        self.value = nn.Linear(n_embd, head_size, bias=False)
+        self.register_buffer('tril', torch.tril(torch.ones(block_size, block_size)))
+
+    def forward(self, x):
+        B, T, C = x.shape
+        k = self.key(x)   # (B,T,head_size)
+        q = self.query(x) # (B,T,head_size)
+        wei = q @ k.transpose(-2, -1) * C**-0.5  # (B,T,T)
+        wei = wei.masked_fill(self.tril[:T, :T] == 0, float('-inf'))  # (B,T,T)
+        wei = F.softmax(wei, dim=-1)  # (B,T,T)
+        v = self.value(x)  # (B,T,head_size)
+        out = wei @ v  # (B,T,head_size)
+        return out
+
+
+
+
 class BigramLanguageModel(nn.Module):
     def __init__(self, vocab_size):
         super().__init__()
         # each token directly reads off the logits for the next token from a lookup table
         self.token_embedding_table = nn.Embedding(vocab_size, n_embd)
         self.position_embedding_table = nn.Embedding(block_size, n_embd)
+        self.sa_head = Head(n_embd)
         self.lm_head = nn.Linear(n_embd, vocab_size)
 
     def forward(self, idx, targets=None):
@@ -80,6 +107,7 @@ class BigramLanguageModel(nn.Module):
         tok_emb = self.token_embedding_table(idx)  # (B,T,C)
         pos_emb = self.position_embedding_table(torch.arange(T, device=device))  # (T,C)
         x = tok_emb + pos_emb  # (B,T,C)
+        x = self.sa_head(x)  # (B,T,C)
         logits = self.lm_head(x) # (B,T,vocab_size)
 
         if targets is None:
@@ -95,8 +123,9 @@ class BigramLanguageModel(nn.Module):
     def generate(self, idx, max_new_tokens):
         # idx is (B,T) array of indices in the current context
         for _ in range(max_new_tokens):
+            idx_cond = idx[:, -block_size:]  # crop to the last block_size tokens
             # get the predictions
-            logits, _ = self(idx)
+            logits, _ = self(idx_cond)
             # focus only on the last time step
             logits = logits[:, -1, :]  # (B,C)
             # apply softmax to get probabilities
@@ -108,6 +137,11 @@ class BigramLanguageModel(nn.Module):
         return idx
     
 
+
+
+
+
+
 '''logits, loss = model(x, y)
 print("logits shape:", logits.shape)
 print("loss:", loss)
@@ -118,11 +152,11 @@ print(decode(m.generate(torch.zeros((1, 1), dtype=torch.long).to(device), max_ne
 model = BigramLanguageModel(vocab_size)
 m = model.to(device)
 logits, loss = m(x, y)
-print("logits shape:", logits.shape)
+'''print("logits shape:", logits.shape)
 print("loss:", loss)
-print(decode(m.generate(torch.zeros((1, 1), dtype=torch.long).to(device), max_new_tokens=100)[0].tolist()))  # Decode the predicted tokens for verification
+print(decode(m.generate(torch.zeros((1, 1), dtype=torch.long).to(device), max_new_tokens=100)[0].tolist()))  # Decode the predicted tokens for verification'''
 
-optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
+optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
 for steps in range(max_iters):
     xb, yb = get_batch('train')
 
@@ -131,6 +165,6 @@ for steps in range(max_iters):
     loss.backward()
     optimizer.step()
     if steps % eval_interval == 0:
-        print(f"step {steps}: loss {loss.item()}")
-        print("----")
-        print(decode(m.generate(torch.zeros((1, 1), dtype=torch.long).to(device), max_new_tokens=100)[0].tolist()))  # Decode the predicted tokens for verification
+        print(f"step {steps}: loss {loss.item():.4f}")
+        #print("----")
+        #print(decode(m.generate(torch.zeros((1, 1), dtype=torch.long).to(device), max_new_tokens=100)[0].tolist()))  # Decode the predicted tokens for verification
